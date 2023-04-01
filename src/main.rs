@@ -1,8 +1,10 @@
 mod std_writer;
 
-use chrono;
 use clap::Parser;
+
 use sqlx::mysql::{MySqlColumn, MySqlPoolOptions, MySqlRow};
+use sqlx::types::chrono::Local;
+use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::types::BigDecimal;
 use sqlx::{Column, Row};
 use std::process;
@@ -11,14 +13,14 @@ use url::Url;
 
 /// Standalone database dump tool
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, arg_required_else_help(true))]
 struct Args {
     /// Schema to extract
     #[arg(short, long, required = false)]
     schema: Option<String>,
 
     /// Database url to connect to
-    #[arg(short, long, env = "DATABASE_URL")]
+    #[arg(short, long)]
     url: String,
 
     /// Extract schema only
@@ -36,6 +38,14 @@ struct Args {
     /// Use single row inserts
     #[arg(long = "single-row-inserts", required = false, default_value_t = false)]
     single_row_inserts: bool,
+
+    /// BETA: Skip any datatype we don't understand - set the field to null
+    #[arg(
+        long = "beta-skip-unknown-datatypes",
+        required = false,
+        default_value_t = false
+    )]
+    skip_unknown_datatypes: bool,
 }
 
 #[async_std::main]
@@ -116,7 +126,7 @@ async fn main() -> Result<(), sqlx::Error> {
 
                 let cols = data.columns().len();
                 for i in 0..cols - 1 {
-                    let value = cast_data(&data, i);
+                    let value = cast_data(&data, i, args.skip_unknown_datatypes);
                     if let Some(value) = value {
                         w.print(format!("{},", value).as_str());
                     } else {
@@ -124,7 +134,7 @@ async fn main() -> Result<(), sqlx::Error> {
                     }
                 }
 
-                let value = cast_data(&data, cols - 1);
+                let value = cast_data(&data, cols - 1, args.skip_unknown_datatypes);
                 if let Some(value) = value {
                     w.print(format!("{}", value).as_str());
                 } else {
@@ -146,63 +156,62 @@ async fn main() -> Result<(), sqlx::Error> {
             }
         }
     }
-    w.println("SET FOREIGN_KEY_CHECKS=0;");
+    w.println("SET FOREIGN_KEY_CHECKS=1;");
     w.flush();
     Ok(())
 }
 
-fn cast_data(row: &MySqlRow, index: usize) -> Option<String> {
-    let result = row.try_get::<i64, usize>(index);
-    if result.is_ok() {
-        return if let Some(value) = result.ok() {
-            Option::Some(value.to_string())
-        } else {
-            None
-        };
+pub fn cast_data(row: &MySqlRow, index: usize, skip_unknown_datatypes: bool) -> Option<String> {
+    let col = row.column(index);
+    let type_name = col.type_info().to_string();
+
+    /*
+    This check protects against null data - lots of trail and error to get to this particular code that actually works
+    */
+    if row.try_get_unchecked::<&str, usize>(index).ok().is_none()
+        && row.try_get_unchecked::<i64, usize>(index).ok().is_none()
+    {
+        return None;
     }
 
-    let result = row.try_get::<i32, usize>(index);
-    if result.is_ok() {
-        return if let Some(value) = result.ok() {
-            Option::Some(value.to_string())
-        } else {
-            None
-        };
+    match type_name.as_str() {
+        "BOOLEAN" => Some(row.get::<bool, usize>(index).to_string()),
+        "TINYINT" => Some(row.get::<i8, usize>(index).to_string()),
+        "SMALLINT" => Some(row.get::<i16, usize>(index).to_string()),
+        "INT" => Some(row.get::<i32, usize>(index).to_string()),
+        "BIGINT" => Some(row.get::<i64, usize>(index).to_string()),
+        "TINYINT UNSIGNED" => Some(row.get::<u8, usize>(index).to_string()),
+        "SMALLINT UNSIGNED" => Some(row.get::<u16, usize>(index).to_string()),
+        "INT UNSIGNED" => Some(row.get::<u32, usize>(index).to_string()),
+        "BIGINT UNSIGNED" => Some(row.get::<u64, usize>(index).to_string()),
+        "FLOAT" => Some(row.get::<f32, usize>(index).to_string()),
+        "DOUBLE" => Some(row.get::<f64, usize>(index).to_string()),
+        "CHAR" => Some(quote(row.get::<String, usize>(index))),
+        "VARCHAR" => Some(quote(row.get::<String, usize>(index))),
+        "TEXT" => Some(quote(row.get::<String, usize>(index))),
+        "TIMESTAMP" => Some(quote(row.get::<DateTime<Utc>, usize>(index).to_string())),
+        "DATETIME" => Some(quote(row.get::<NaiveDateTime, usize>(index).to_string())),
+        "DATE" => Some(quote(row.get::<NaiveDate, usize>(index).to_string())),
+        "TIME" => Some(quote(row.get::<NaiveTime, usize>(index).to_string())),
+        "DECIMAL" => Some(row.get::<BigDecimal, usize>(index).to_string()),
+        // "AddOtherTypesHere" => Some(row.get::<i64, usize>(index).to_string()),
+        // Add support for Binary data
+        "VARBINARY" => None,
+        "BINARY" => None,
+        "BLOB" => None,
+
+        _ => {
+            if skip_unknown_datatypes {
+                None
+            } else {
+                panic!("The database type {} is not implemented in this version of dbdump. Please try to download a more recent version or report a bug if you are on the most recent version", type_name)
+            }
+        }
     }
+}
 
-    let result = row.try_get::<BigDecimal, usize>(index);
-    if result.is_ok() {
-        return if let Some(value) = result.ok() {
-            Option::Some(value.to_string())
-        } else {
-            None
-        };
-    }
-
-    let result = row.try_get::<String, usize>(index);
-    if result.is_ok() {
-        return if let Some(value) = result.ok() {
-            Option::Some(format!("'{}'", value))
-        } else {
-            None
-        };
-    }
-
-    let result = row.try_get::<bool, usize>(index);
-    if result.is_ok() {
-        return if let Some(value) = result.ok() {
-            Option::Some(value.to_string())
-        } else {
-            None
-        };
-    }
-
-    println!(
-        "\n\n\n!!!!!!!!!!!!!!!!!!!!!!!!! Failed to parse data: {:?} !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n\n",
-        row.try_get::<String, usize>(index).err()
-    );
-
-    None
+fn quote(str: String) -> String {
+    format!("'{}'", str)
 }
 
 fn compute_column_name(columns: &[MySqlColumn]) -> String {
@@ -218,7 +227,7 @@ fn write_header(writer: &mut StdWriter, schema: &String, url: &String) {
     writer.println("-- Database Dump Tool v0.2.0");
     writer.println("-- https://github.com/wcherry/dbdump");
     writer.println("-- ");
-    writer.println(format!("-- Created at {}", chrono::offset::Local::now()).as_str());
+    writer.println(format!("-- Created at {}", Local::now()).as_str());
     writer.println(format!("-- Schema: {}", schema).as_str());
     writer.println(format!("-- URL: {}", url).as_str());
     writer.println("-- -----------------------------------------------------------------------------------------");

@@ -1,13 +1,13 @@
 [package]
 name = "dbdump"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
+author = "William Cherry (wcherry69@gmail.com)"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-sqlx = { version = "0.6.3", features = [ "runtime-async-std-native-tls", "mysql", "offline", "macros", "bigdecimal"  ] }
+sqlx = { version = "0.6.3", features = [ "runtime-async-std-native-tls", "mysql", "offline", "macros", "bigdecimal", "chrono"  ] }
 async-std = { version = "1", features = [ "attributes" ] }
 clap = { version = "4.2.1", features = ["derive", "env"] }
-chrono = "0.4.24"
 url="2.3.1"
