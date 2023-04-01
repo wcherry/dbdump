@@ -536,6 +536,7 @@ dependencies = [
  "async-std",
  "clap",
  "sqlx",
+ "url",
 ]
 
 [[package]]
