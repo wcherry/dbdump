@@ -540,6 +540,7 @@ dependencies = [
  "chrono",
  "clap",
  "sqlx",
+ "url",
 ]
 
 [[package]]

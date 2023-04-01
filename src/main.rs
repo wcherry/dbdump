@@ -5,15 +5,17 @@ use clap::Parser;
 use sqlx::mysql::{MySqlColumn, MySqlPoolOptions, MySqlRow};
 use sqlx::types::BigDecimal;
 use sqlx::{Column, Row};
+use std::process;
 use std_writer::StdWriter;
+use url::Url;
 
 /// Standalone database dump tool
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Schema to extract
-    #[arg(short, long, default_value_t = String::from("test"))]
-    schema: String,
+    #[arg(short, long, required = false)]
+    schema: Option<String>,
 
     /// Database url to connect to
     #[arg(short, long, env = "DATABASE_URL")]
@@ -44,6 +46,17 @@ async fn main() -> Result<(), sqlx::Error> {
     let args = Args::parse();
     let mut w = StdWriter::new(args.output_file);
     let max_insert_count = if args.single_row_inserts { 1 } else { 100 };
+    let schema = if let Some(schema) = args.schema {
+        schema
+    } else {
+        let url = Url::parse(&args.url);
+        let url = url.expect("Invalid url, unable to parse");
+        url.path()
+            .split_once('/')
+            .expect("Unable to obtain the schema. Either include the schema name as part of the url or pass it using the --schema argument")
+            .1
+            .to_string()
+    };
 
     //
     // Create a pool of connections, probably not required as we currently only use one connection
@@ -53,25 +66,25 @@ async fn main() -> Result<(), sqlx::Error> {
         .connect(&args.url)
         .await?;
 
-    write_header(&mut w, &args.schema, &args.url);
+    write_header(&mut w, &schema, &args.url);
 
     //
     // Grab all of the tables from the selected schema
     let rows: Vec<(String,)> =
         sqlx::query_as("select table_name from information_schema.tables where table_schema=?")
-            .bind(&args.schema)
+            .bind(&schema)
             .fetch_all(&pool)
             .await?;
     if let Some(schema) = args.renamed_schema_name {
         w.println(format!("use {};", schema).as_str());
     } else {
-        w.println(format!("use {};", &args.schema).as_str());
+        w.println(format!("use {};", &schema).as_str());
     }
     w.println("SET FOREIGN_KEY_CHECKS=0;");
     for row in &rows {
         w.println(format!("-- Extract DDL for table {}", row.0).as_str());
         let ddl: (String, String) =
-            sqlx::query_as(&format!("SHOW CREATE TABLE {}.{}", &args.schema, &row.0))
+            sqlx::query_as(&format!("SHOW CREATE TABLE {}.{}", &schema, &row.0))
                 .fetch_one(&pool)
                 .await?;
         w.println(format!("{};", ddl.1).as_str());
@@ -81,7 +94,7 @@ async fn main() -> Result<(), sqlx::Error> {
             w.println(format!("-- Extracting data for {}", row.0).as_str());
             let mut count = 0;
             // query table
-            let data_rows = sqlx::query::<_>(&format!("select * from {}.{}", &args.schema, &row.0))
+            let data_rows = sqlx::query::<_>(&format!("select * from {}.{}", &schema, &row.0))
                 .fetch_all(&pool)
                 .await?;
             if data_rows.len() == 0 {
