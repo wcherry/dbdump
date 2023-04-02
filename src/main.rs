@@ -1,13 +1,12 @@
 mod std_writer;
 
 use clap::Parser;
-
 use sqlx::mysql::{MySqlColumn, MySqlPoolOptions, MySqlRow};
 use sqlx::types::chrono::Local;
 use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::types::BigDecimal;
 use sqlx::{Column, Row};
-use std::process;
+use std::fmt::Display;
 use std_writer::StdWriter;
 use url::Url;
 
@@ -34,6 +33,10 @@ struct Args {
     /// Rename the schema
     #[arg(long = "new-schema-name", required = false)]
     renamed_schema_name: Option<String>,
+
+    /// Don't create the schema
+    #[arg(long = "no-create-schema", required = false, default_value_t = true)]
+    create_schema: bool,
 
     /// Use single row inserts
     #[arg(long = "single-row-inserts", required = false, default_value_t = false)]
@@ -85,9 +88,16 @@ async fn main() -> Result<(), sqlx::Error> {
             .bind(&schema)
             .fetch_all(&pool)
             .await?;
+
     if let Some(schema) = args.renamed_schema_name {
-        w.println(format!("use {};", schema).as_str());
+        if args.create_schema {
+            w.println(format!("create schema {};", &schema).as_str());
+        }
+        w.println(format!("use {};", &schema).as_str());
     } else {
+        if args.create_schema {
+            w.println(format!("create schema {};", &schema).as_str());
+        }
         w.println(format!("use {};", &schema).as_str());
     }
     w.println("SET FOREIGN_KEY_CHECKS=0;");
@@ -165,36 +175,28 @@ pub fn cast_data(row: &MySqlRow, index: usize, skip_unknown_datatypes: bool) -> 
     let col = row.column(index);
     let type_name = col.type_info().to_string();
 
-    /*
-    This check protects against null data - lots of trail and error to get to this particular code that actually works
-    */
-    if row.try_get_unchecked::<&str, usize>(index).ok().is_none()
-        && row.try_get_unchecked::<i64, usize>(index).ok().is_none()
-    {
-        return None;
-    }
-
     match type_name.as_str() {
-        "BOOLEAN" => Some(row.get::<bool, usize>(index).to_string()),
-        "TINYINT" => Some(row.get::<i8, usize>(index).to_string()),
-        "SMALLINT" => Some(row.get::<i16, usize>(index).to_string()),
-        "INT" => Some(row.get::<i32, usize>(index).to_string()),
-        "BIGINT" => Some(row.get::<i64, usize>(index).to_string()),
-        "TINYINT UNSIGNED" => Some(row.get::<u8, usize>(index).to_string()),
-        "SMALLINT UNSIGNED" => Some(row.get::<u16, usize>(index).to_string()),
-        "INT UNSIGNED" => Some(row.get::<u32, usize>(index).to_string()),
-        "BIGINT UNSIGNED" => Some(row.get::<u64, usize>(index).to_string()),
-        "FLOAT" => Some(row.get::<f32, usize>(index).to_string()),
-        "DOUBLE" => Some(row.get::<f64, usize>(index).to_string()),
-        "CHAR" => Some(quote(row.get::<String, usize>(index))),
-        "VARCHAR" => Some(quote(row.get::<String, usize>(index))),
-        "TEXT" => Some(quote(row.get::<String, usize>(index))),
-        "TIMESTAMP" => Some(quote(row.get::<DateTime<Utc>, usize>(index).to_string())),
-        "DATETIME" => Some(quote(row.get::<NaiveDateTime, usize>(index).to_string())),
-        "DATE" => Some(quote(row.get::<NaiveDate, usize>(index).to_string())),
-        "TIME" => Some(quote(row.get::<NaiveTime, usize>(index).to_string())),
-        "DECIMAL" => Some(row.get::<BigDecimal, usize>(index).to_string()),
-        // "AddOtherTypesHere" => Some(row.get::<i64, usize>(index).to_string()),
+        "BOOLEAN" => to_string(row.try_get::<bool, usize>(index), false),
+        "TINYINT" => to_string(row.try_get::<i8, usize>(index), false),
+        "SMALLINT" => to_string(row.try_get::<i16, usize>(index), false),
+        "INT" => to_string(row.try_get::<i32, usize>(index), false),
+        "BIGINT" => to_string(row.try_get::<i64, usize>(index), false),
+        "TINYINT UNSIGNED" => to_string(row.try_get::<u8, usize>(index), false),
+        "SMALLINT UNSIGNED" => to_string(row.try_get::<u16, usize>(index), false),
+        "INT UNSIGNED" => to_string(row.try_get::<u32, usize>(index), false),
+        "BIGINT UNSIGNED" => to_string(row.try_get::<u64, usize>(index), false),
+        "FLOAT" => to_string(row.try_get::<f32, usize>(index), false),
+        "DOUBLE" => to_string(row.try_get::<f64, usize>(index), false),
+        "CHAR" => to_string(row.try_get::<String, usize>(index), true),
+        "VARCHAR" => to_string(row.try_get::<String, usize>(index), true),
+        "TEXT" => to_string(row.try_get::<String, usize>(index), true),
+        "TIMESTAMP" => to_date_string(row.try_get::<DateTime<Utc>, usize>(index)),
+        "DATETIME" => to_date_string(row.try_get::<NaiveDateTime, usize>(index)),
+        "DATE" => to_date_string(row.try_get::<NaiveDate, usize>(index)),
+        "TIME" => to_date_string(row.try_get::<NaiveTime, usize>(index)),
+        "DECIMAL" => to_string(row.try_get::<BigDecimal, usize>(index), false),
+        "ENUM" => to_string(row.try_get::<String, usize>(index), true),
+        // "AddOtherTypesHere" => to_string(row.try_get::<i64, usize>(index), false),
         // Add support for Binary data
         "VARBINARY" => None,
         "BINARY" => None,
@@ -231,4 +233,31 @@ fn write_header(writer: &mut StdWriter, schema: &String, url: &String) {
     writer.println(format!("-- Schema: {}", schema).as_str());
     writer.println(format!("-- URL: {}", url).as_str());
     writer.println("-- -----------------------------------------------------------------------------------------");
+}
+
+fn to_string<T: Display>(n: Result<T, sqlx::Error>, q: bool) -> Option<String> {
+    if let Ok(v) = n {
+        Some(if q {
+            quote(v.to_string())
+        } else {
+            v.to_string()
+        })
+    } else {
+        None
+    }
+}
+
+fn to_date_string<T: Display>(n: Result<T, sqlx::Error>) -> Option<String> {
+    if let Ok(v) = n {
+        // Strip off the UTC that is added to Timestamps
+        let str = if v.to_string().ends_with("UTC") {
+            let s = v.to_string();
+            s[0..s.len() - 4].to_string()
+        } else {
+            v.to_string()
+        };
+        Some(format!("'{}'", str))
+    } else {
+        None
+    }
 }
