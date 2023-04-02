@@ -1,6 +1,6 @@
 [package]
 name = "dbdump"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 author = "William Cherry (wcherry69@gmail.com)"
 
