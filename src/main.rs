@@ -83,7 +83,7 @@ async fn main() -> Result<(), sqlx::Error> {
 
     //
     // Grab all of the tables from the selected schema
-    let rows: Vec<(String,)> =
+    let table_names: Vec<(String,)> =
         sqlx::query_as("select table_name from information_schema.tables where table_schema=?")
             .bind(&schema)
             .fetch_all(&pool)
@@ -101,7 +101,7 @@ async fn main() -> Result<(), sqlx::Error> {
         w.println(format!("use {};", &schema).as_str());
     }
     w.println("SET FOREIGN_KEY_CHECKS=0;");
-    for row in &rows {
+    for row in &table_names {
         w.println(format!("-- Extract DDL for table {}", row.0).as_str());
         let ddl: (String, String) =
             sqlx::query_as(&format!("SHOW CREATE TABLE {}.{}", &schema, &row.0))
@@ -109,8 +109,61 @@ async fn main() -> Result<(), sqlx::Error> {
                 .await?;
         w.println(format!("{};", ddl.1).as_str());
     }
+
+    // Extract stored procedures - only support body type of SQL
+    let routines: Vec<(String,String)> = sqlx::query_as(
+        "select routine_name, routine_definition from information_schema.routines where routine_schema=? and routine_body='SQL' and routine_type='PROCEDURE'",
+    )
+    .bind(&schema)
+    .fetch_all(&pool)
+    .await?;
+    for row in &routines {
+        // get the parameters
+        let parameters: Vec<(String,String,String)> = sqlx::query_as(
+        "select parameter_mode, parameter_name, dtd_identifier from information_schema.parameters where specific_schema=? and specific_name=? and routine_type='PROCEDURE'",
+        )
+        .bind(&schema)
+        .bind(&row.0)
+        .fetch_all(&pool)
+        .await?;
+
+        //join params into p.0 p.1 p.2
+        let p_str = parameters
+            .into_iter()
+            .map(|p| format!("{} {} {}", p.0, p.1, p.2))
+            .collect::<Vec<String>>()
+            .join(",");
+
+        w.println(format!("-- Extract DDL for view {}", row.0).as_str());
+        w.println(format!("create procedure {}({})\n{};", row.0, p_str, row.1).as_str());
+    }
+
+    // Extract functions - only support body type of SQL
+    // let routines: Vec<(String,String,String)> = sqlx::query_as(
+    //     "select routine_name, routine_definition from information_schema.tables where table_schema=? and routine_body='SQL' and routine_type='FUNCTION'",
+    // )
+    // .bind(&schema)
+    // .fetch_all(&pool)
+    // .await?;
+    // for row in &routines {
+    //     w.println(format!("-- Extract DDL for view {}", row.0).as_str());
+    //     w.println(format!("create function {}\n {};", row.0, row.1).as_str());
+    // }
+
+    // Extract views
+    let views: Vec<(String, String)> = sqlx::query_as(
+        "select table_name, view_definition from information_schema.views where table_schema=?",
+    )
+    .bind(&schema)
+    .fetch_all(&pool)
+    .await?;
+    for row in &views {
+        w.println(format!("-- Extract DDL for view {}", row.0).as_str());
+        w.println(format!("create view {} as {};", row.0, row.1).as_str());
+    }
+
     if !args.exclude_data {
-        for row in &rows {
+        for row in &table_names {
             w.println(format!("-- Extracting data for {}", row.0).as_str());
             let mut count = 0;
             // query table
