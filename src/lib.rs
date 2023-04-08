@@ -39,15 +39,19 @@ pub async fn export_views(
     schema: &String,
 ) -> Result<(), sqlx::Error> {
     // Extract views
-    let views: Vec<(String, String)> = sqlx::query_as(
-        "select table_name, view_definition from information_schema.views where table_schema=?",
-    )
-    .bind(&schema)
-    .fetch_all(pool)
-    .await?;
-    for row in &views {
+    let view_names: Vec<(String,)> =
+        sqlx::query_as("select table_name from information_schema.tables where table_schema=? and table_type='VIEW'")
+            .bind(&schema)
+            .fetch_all(pool)
+            .await?;
+
+    for row in &view_names {
         writer.println(format!("-- Extract DDL for view {}", row.0).as_str());
-        writer.println(format!("create view {} as {};", row.0, row.1).as_str());
+        let ddl: (String, String) =
+            sqlx::query_as(&format!("SHOW CREATE VIEW {}.{}", &schema, &row.0))
+                .fetch_one(pool)
+                .await?;
+        writer.println(format!("{};", ddl.1).as_str());
     }
     Ok(())
 }
