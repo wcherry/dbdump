@@ -17,6 +17,12 @@ struct Args {
     #[arg(short, long)]
     url: String,
 
+    #[arg(long = "user", required = false)]
+    username: Option<String>,
+
+    #[arg(long = "pass", required = false)]
+    password: Option<String>,
+
     /// Extract schema only
     #[arg(short = 'd', long = "no-data", default_value_t = false)]
     exclude_data: bool,
@@ -56,12 +62,20 @@ async fn main() -> Result<(), sqlx::Error> {
     // Parse the command line arguments and set the writer to write to a file or STDOUT
     //
     let args = Args::parse();
+
+    let mut url = Url::parse(&args.url).expect("Invalid url, unable to parse");
+    if let Some(user) = args.username {
+        url.set_username(&user).expect("Cannot set username");
+    }
+    if let Some(pass) = args.password {
+        url.set_password(Some(pass.as_str()))
+            .expect("Cannot set password");
+    }
+
     let mut writer = StdWriter::new(args.output_file);
     let schema = if let Some(schema) = args.schema {
         schema
     } else {
-        let url = Url::parse(&args.url);
-        let url = url.expect("Invalid url, unable to parse");
         url.path()
             .split_once('/')
             .expect("Unable to obtain the schema. Either include the schema name as part of the url or pass it using the --schema argument")
@@ -74,7 +88,7 @@ async fn main() -> Result<(), sqlx::Error> {
     //
     let pool = MySqlPoolOptions::new()
         .max_connections(5)
-        .connect(&args.url)
+        .connect(&url.to_string())
         .await?;
 
     write_header(&mut writer, &schema, &args.url);
