@@ -11,3 +11,4 @@ sqlx = { version = "0.6.3", features = [ "runtime-async-std-native-tls", "mysql"
 async-std = { version = "1", features = [ "attributes" ] }
 clap = { version = "4.2.1", features = ["derive", "env"] }
 url="2.3.1"
+regex = "1.7.3"

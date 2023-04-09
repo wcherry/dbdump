@@ -84,13 +84,17 @@ async fn main() -> Result<(), sqlx::Error> {
     };
 
     //
-    // Create a pool of connections, probably not required as we currently only use one connection
+    // Create a pool of connections.
+    // Probably overkill as we currently only use one connection
     //
     let pool = MySqlPoolOptions::new()
         .max_connections(5)
         .connect(&url.to_string())
         .await?;
 
+    //
+    // Start writing the 'file', header and whatever other statements required
+    //
     write_header(&mut writer, &schema, &args.url);
     write_prefix(
         &mut writer,
@@ -100,6 +104,13 @@ async fn main() -> Result<(), sqlx::Error> {
         true,
     );
 
+    //
+    // The order of the writes should be as follows:
+    // 1. Base tables
+    // 2. Views (require tables)
+    // 3. Stored procedures and functions
+    // 4. Triggers
+    //
     if !args.exclude_ddl {
         export_tables(&pool, &mut writer, &schema).await?;
         export_views(&pool, &mut writer, &schema).await?;
@@ -108,6 +119,11 @@ async fn main() -> Result<(), sqlx::Error> {
         // export_triggers(pool, w, &schema);
     }
 
+    //
+    // After the DDL is written write the data.
+    // We turn off constraints until after the data is loaded so that
+    //   we don't run into any constraint violations during the load
+    //
     if !args.exclude_data {
         export_data(
             &pool,
