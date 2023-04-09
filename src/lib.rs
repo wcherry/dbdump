@@ -1,5 +1,6 @@
 pub mod std_writer;
 
+use regex::Regex;
 use sqlx::mysql::{MySql, MySqlColumn, MySqlRow};
 use sqlx::pool::Pool;
 use sqlx::types::chrono::Local;
@@ -9,6 +10,10 @@ use sqlx::{Column, Row};
 use std::fmt::Display;
 use std_writer::StdWriter;
 
+//
+// Export the table DDL - tables are ordered so that we try and
+//   avoid any table dependencies.
+//
 pub async fn export_tables(
     pool: &Pool<MySql>,
     writer: &mut StdWriter,
@@ -22,10 +27,12 @@ pub async fn export_tables(
             .fetch_all(pool)
             .await?;
 
-    for row in &table_names {
-        writer.println(format!("-- Extract DDL for table {}", row.0).as_str());
+    let table_names = order_tables(pool, schema, table_names).await?;
+
+    for table_name in &table_names {
+        writer.println(format!("-- Extract DDL for table {}", table_name).as_str());
         let ddl: (String, String) =
-            sqlx::query_as(&format!("SHOW CREATE TABLE {}.{}", &schema, &row.0))
+            sqlx::query_as(&format!("SHOW CREATE TABLE {}.{}", &schema, &table_name))
                 .fetch_one(pool)
                 .await?;
         writer.println(format!("{};", ddl.1).as_str());
@@ -33,6 +40,10 @@ pub async fn export_tables(
     Ok(())
 }
 
+//
+// Export the view DDL - views are ordered so that we try and
+//   avoid any view dependencies.
+//
 pub async fn export_views(
     pool: &Pool<MySql>,
     writer: &mut StdWriter,
@@ -45,10 +56,12 @@ pub async fn export_views(
             .fetch_all(pool)
             .await?;
 
-    for row in &view_names {
-        writer.println(format!("-- Extract DDL for view {}", row.0).as_str());
+    let view_names = order_views(pool, schema, view_names).await?;
+
+    for name in &view_names {
+        writer.println(format!("-- Extract DDL for view {}", name).as_str());
         let ddl: (String, String) =
-            sqlx::query_as(&format!("SHOW CREATE VIEW {}.{}", &schema, &row.0))
+            sqlx::query_as(&format!("SHOW CREATE VIEW {}.{}", &schema, name))
                 .fetch_one(pool)
                 .await?;
         writer.println(format!("{};", ddl.1).as_str());
@@ -304,4 +317,75 @@ fn to_date_string<T: Display>(n: Result<T, sqlx::Error>) -> Option<String> {
     } else {
         None
     }
+}
+
+async fn order_tables(
+    pool: &Pool<MySql>,
+    schema: &String,
+    tables: Vec<(String,)>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut sorted_tables: Vec<String> = tables.iter().map(|t| t.0.to_string()).collect();
+
+    let rows : Vec<(String, String)>= sqlx::query_as("select TABLE_NAME,REFERENCED_TABLE_NAME from information_schema.REFERENTIAL_CONSTRAINTS where CONSTRAINT_SCHEMA=?")
+    .bind(&schema)
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let mut it = sorted_tables.iter();
+        let tab_index = it
+            .position(|s| s == &row.0)
+            .expect("Found a reference to a table that doesn't exists");
+        let ref_index = it
+            .position(|s| s == &row.1)
+            .expect("Found a referenced table that doesn't exists");
+        if ref_index > tab_index {
+            sorted_tables.remove(ref_index);
+            sorted_tables.insert(tab_index, row.0);
+        }
+    }
+    return Ok(sorted_tables);
+}
+
+async fn order_views(
+    pool: &Pool<MySql>,
+    schema: &String,
+    views: Vec<(String,)>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let from_regex = Regex::new(r"from\s+(\()?`[^`]+`\.`([^`]+)`").unwrap();
+    let join_regex = Regex::new(r"join\s+(\()?`[^`]+`\.`([^`]+)`").unwrap();
+
+    let mut sorted_views = views.iter().map(|t| t.0.to_string()).collect();
+    for view in views {
+        let ddl: (String, String) =
+            sqlx::query_as(&format!("SHOW CREATE VIEW {}.{}", &schema, &view.0))
+                .fetch_one(pool)
+                .await?;
+        for grp in from_regex.captures_iter(&ddl.1) {
+            sorted_views = reorder_vec(sorted_views, &view.0, &grp[0].to_string());
+        }
+        for grp in join_regex.captures_iter(&ddl.1) {
+            sorted_views = reorder_vec(sorted_views, &view.0, &grp[0].to_string());
+        }
+    }
+
+    return Ok(sorted_views);
+}
+
+fn reorder_vec(mut vec: Vec<String>, table_name: &String, ref_name: &String) -> Vec<String> {
+    let mut it = vec.iter();
+    let tab_index = it
+        .position(|s| s == table_name)
+        .expect("Found a reference to a table/view that doesn't exists");
+    let ref_index = it.position(|s| s == ref_name);
+    if let Some(ref_index) = ref_index {
+        if ref_index > tab_index {
+            vec.remove(ref_index);
+            vec.insert(tab_index, ref_name.to_string());
+        }
+    } else {
+        dbg!("Found ref to {value2} searching view {value1}");
+    }
+
+    return vec;
 }
