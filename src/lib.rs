@@ -1,5 +1,6 @@
+pub mod logger;
 pub mod std_writer;
-
+use logger::Logger;
 use regex::Regex;
 use sqlx::mysql::{MySql, MySqlColumn, MySqlRow};
 use sqlx::pool::Pool;
@@ -333,12 +334,19 @@ async fn order_tables(
 
     for row in rows {
         let mut it = sorted_tables.iter();
-        let tab_index = it
-            .position(|s| s == &row.0)
-            .expect("Found a reference to a table that doesn't exists");
-        let ref_index = it
-            .position(|s| s == &row.1)
-            .expect("Found a referenced table that doesn't exists");
+        let tab_index = it.position(|s| s == &row.0);
+        let ref_index = it.position(|s| s == &row.1);
+        if tab_index.is_none() {
+            Logger::info("Found a reference to a table {row.0} that doesn't exists");
+            continue;
+        }
+        let tab_index = tab_index.unwrap();
+        if ref_index.is_none() {
+            Logger::info("Found a referenced table {row.1} that doesn't exists");
+            continue;
+        }
+        let ref_index = ref_index.unwrap();
+
         if ref_index > tab_index {
             sorted_tables.remove(ref_index);
             sorted_tables.insert(tab_index, row.0);
@@ -374,17 +382,22 @@ async fn order_views(
 
 fn reorder_vec(mut vec: Vec<String>, table_name: &String, ref_name: &String) -> Vec<String> {
     let mut it = vec.iter();
-    let tab_index = it
-        .position(|s| s == table_name)
-        .expect("Found a reference to a table/view that doesn't exists");
+    let tab_index = it.position(|s| s == table_name);
     let ref_index = it.position(|s| s == ref_name);
-    if let Some(ref_index) = ref_index {
-        if ref_index > tab_index {
-            vec.remove(ref_index);
-            vec.insert(tab_index, ref_name.to_string());
-        }
-    } else {
-        dbg!("Found ref to {value2} searching view {value1}");
+    if tab_index.is_none() {
+        Logger::info("Found a reference to a table/view {table_name} that doesn't exists");
+        return vec;
+    }
+    let tab_index = tab_index.unwrap();
+    if ref_index.is_none() {
+        Logger::info("Found a referenced table/view {ref_name} that doesn't exists");
+        return vec;
+    }
+    let ref_index = ref_index.unwrap();
+
+    if ref_index > tab_index {
+        let org_ref = vec.remove(ref_index);
+        vec.insert(tab_index, org_ref);
     }
 
     return vec;
