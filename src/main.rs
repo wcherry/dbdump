@@ -116,7 +116,7 @@ async fn main() -> Result<(), sqlx::Error> {
         export_views(&pool, &mut writer, &schema).await?;
         export_stored_procs(&pool, &mut writer, &schema).await?;
         export_functions(&pool, &mut writer, &schema).await?;
-        // export_triggers(pool, w, &schema);
+        export_triggers(&pool, &mut writer, &schema).await?;
     }
 
     //

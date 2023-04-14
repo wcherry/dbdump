@@ -146,6 +146,44 @@ pub async fn export_functions(
     Ok(())
 }
 
+pub async fn export_triggers(
+    pool: &Pool<MySql>,
+    writer: &mut StdWriter,
+    schema: &String,
+) -> Result<(), sqlx::Error> {
+    // Extract stored procedures - only support body type of SQL
+    let triggers: Vec<(String,)> = sqlx::query_as(
+        "select trigger_name from information_schema.triggers where trigger_schema=?",
+    )
+    .bind(&schema)
+    .fetch_all(pool)
+    .await?;
+    for row in &triggers {
+        // get the parameters
+        let (trigger, sql_mode, ddl, character_set, collation, db_collation): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = sqlx::query_as(format!("show create trigger {}.{}", &schema, &row.0).as_str())
+            .fetch_one(pool)
+            .await?;
+
+        writer.println(format!("-- Extract DDL for trigger {}", trigger).as_str());
+        writer.println(format!("-- SQL Mode {}", sql_mode).as_str());
+        writer.println(format!("-- Character Set {}", character_set).as_str());
+        writer.println(format!("-- Collation {}", collation).as_str());
+        writer.println(format!("-- Database Collation {}", db_collation).as_str());
+
+        writer.println("DELIMITER ;;");
+        writer.println(format!("{};;", ddl).as_str());
+        writer.println("DELIMITER ;");
+    }
+    Ok(())
+}
+
 pub async fn export_data(
     pool: &Pool<MySql>,
     writer: &mut StdWriter,
@@ -313,7 +351,7 @@ pub fn write_prefix(
 
 pub fn write_postfix(writer: &mut StdWriter, disable_check: bool) {
     if disable_check {
-        writer.println("SET FOREIGN_KEY_CHECKS=0;");
+        writer.println("SET FOREIGN_KEY_CHECKS=1;");
     }
 }
 
