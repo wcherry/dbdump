@@ -17,19 +17,19 @@ pub struct LogLevel {
 
 impl Logger {
     pub fn error<T: Display>(msg: T) {
-        eprint!("{msg}");
+        eprintln!("{msg}");
     }
     pub fn warn<T: Display>(msg: T) {
         if LOGGER.logger == Logger::ERROR {
             return;
         }
-        eprint!("{msg}");
+        eprintln!("{msg}");
     }
     pub fn info<T: Display>(msg: T) {
         if LOGGER.logger == Logger::ERROR || LOGGER.logger == Logger::WARN {
             return;
         }
-        eprint!("{msg}");
+        eprintln!("{msg}");
     }
     pub fn debug<T: Display>(msg: T) {
         if LOGGER.logger == Logger::ERROR
@@ -38,6 +38,6 @@ impl Logger {
         {
             return;
         }
-        eprint!("{msg}");
+        eprintln!("{msg}");
     }
 }

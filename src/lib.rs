@@ -76,52 +76,73 @@ pub async fn export_stored_procs(
     schema: &String,
 ) -> Result<(), sqlx::Error> {
     // Extract stored procedures - only support body type of SQL
-    let routines: Vec<(String,String)> = sqlx::query_as(
-        "select routine_name, routine_definition from information_schema.routines where routine_schema=? and routine_body='SQL' and routine_type='PROCEDURE'",
+    let routines: Vec<(String,)> = sqlx::query_as(
+        "select routine_name from information_schema.routines where routine_schema=? and routine_body='SQL' and routine_type='PROCEDURE'",
     )
     .bind(&schema)
     .fetch_all(pool)
     .await?;
     for row in &routines {
         // get the parameters
-        let parameters: Vec<(String,String,String)> = sqlx::query_as(
-        "select parameter_mode, parameter_name, dtd_identifier from information_schema.parameters where specific_schema=? and specific_name=? and routine_type='PROCEDURE'",
-        )
-        .bind(&schema)
-        .bind(&row.0)
-        .fetch_all(pool)
-        .await?;
+        let (procedure, sql_mode, ddl, character_set, collation, db_collation): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = sqlx::query_as(format!("show create procedure {}.{}", &schema, &row.0).as_str())
+            .fetch_one(pool)
+            .await?;
 
-        //join params into p.0 p.1 p.2
-        let p_str = parameters
-            .into_iter()
-            .map(|p| format!("{} {} {}", p.0, p.1, p.2))
-            .collect::<Vec<String>>()
-            .join(",");
+        writer.println(format!("-- Extract DDL for stored procedure {}", procedure).as_str());
+        writer.println(format!("-- SQL Mode {}", sql_mode).as_str());
+        writer.println(format!("-- Character Set {}", character_set).as_str());
+        writer.println(format!("-- Collation {}", collation).as_str());
+        writer.println(format!("-- Database Collation {}", db_collation).as_str());
 
-        writer.println(format!("-- Extract DDL for view {}", row.0).as_str());
-        writer.println(format!("create procedure {}({})\n{};", row.0, p_str, row.1).as_str());
+        writer.println("DELIMITER ;;");
+        writer.println(format!("{};;", ddl).as_str());
+        writer.println("DELIMITER ;");
     }
     Ok(())
 }
 
 pub async fn export_functions(
-    _pool: &Pool<MySql>,
-    _writer: &mut StdWriter,
-    _schema: &String,
+    pool: &Pool<MySql>,
+    writer: &mut StdWriter,
+    schema: &String,
 ) -> Result<(), sqlx::Error> {
-    // Extract functions - only support body type of SQL
-    // let routines: Vec<(String,String,String)> = sqlx::query_as(
-    //     "select routine_name, routine_definition from information_schema.tables where table_schema=? and routine_body='SQL' and routine_type='FUNCTION'",
-    // )
-    // .bind(&schema)
-    // .fetch_all(pool)
-    // .await?;
-    // for row in &routines {
-    //     w.println(format!("-- Extract DDL for view {}", row.0).as_str());
-    //     w.println(format!("create function {}\n {};", row.0, row.1).as_str());
-    // }
+    // Extract stored procedures - only support body type of SQL
+    let routines: Vec<(String,)> = sqlx::query_as(
+        "select routine_name from information_schema.routines where routine_schema=? and routine_body='SQL' and routine_type='FUNCTION'",
+    )
+    .bind(&schema)
+    .fetch_all(pool)
+    .await?;
+    for row in &routines {
+        // get the parameters
+        let (procedure, sql_mode, ddl, character_set, collation, db_collation): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = sqlx::query_as(format!("show create function {}.{}", &schema, &row.0).as_str())
+            .fetch_one(pool)
+            .await?;
 
+        writer.println(format!("-- Extract DDL for function {}", procedure).as_str());
+        writer.println(format!("-- SQL Mode {}", sql_mode).as_str());
+        writer.println(format!("-- Character Set {}", character_set).as_str());
+        writer.println(format!("-- Collation {}", collation).as_str());
+        writer.println(format!("-- Database Collation {}", db_collation).as_str());
+
+        writer.println("DELIMITER ;;");
+        writer.println(format!("{};;", ddl).as_str());
+        writer.println("DELIMITER ;");
+    }
     Ok(())
 }
 
@@ -141,7 +162,7 @@ pub async fn export_data(
             .fetch_all(pool)
             .await?;
 
-    for row in &table_names {
+    'tables: for row in &table_names {
         writer.println(format!("-- Extracting data for {}", row.0).as_str());
         let mut count = 0;
         // query table
@@ -149,7 +170,7 @@ pub async fn export_data(
             .fetch_all(pool)
             .await?;
         if data_rows.len() == 0 {
-            continue;
+            continue 'tables;
         }
         let column_names = compute_column_name(data_rows.get(0).unwrap().columns());
         for i in 0..data_rows.len() {
@@ -162,7 +183,8 @@ pub async fn export_data(
                 continue;
             }
             if count == 0 {
-                writer.print(format!("insert into {} ({}) values(", row.0, column_names).as_str());
+                writer
+                    .print(format!("insert into `{}` ({}) values(", row.0, column_names).as_str());
             }
 
             let cols = data.columns().len();
@@ -185,7 +207,7 @@ pub async fn export_data(
             count = count + 1;
             if count % max_insert_count == 0 {
                 writer.print(
-                    format!(");\ninsert into {} ({}) values(", row.0, column_names).as_str(),
+                    format!(");\ninsert into `{}` ({}) values(", row.0, column_names).as_str(),
                 );
             } else {
                 if i >= data_rows.len() - 1 {
@@ -243,13 +265,19 @@ pub fn cast_data(row: &MySqlRow, index: usize, skip_unknown_datatypes: bool) -> 
 }
 
 fn quote(str: String) -> String {
-    format!("\"{}\"", str)
+    format!(
+        "'{}'",
+        str.replace("'", "''")
+            .replace("\\", "\\\\")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+    )
 }
 
 fn compute_column_name(columns: &[MySqlColumn]) -> String {
     columns
         .into_iter()
-        .map(|x| x.name().to_string())
+        .map(|x| format!("`{}`", x.name()))
         .collect::<Vec<String>>()
         .join(",")
 }
@@ -333,23 +361,34 @@ async fn order_tables(
     .await?;
 
     for row in rows {
-        let mut it = sorted_tables.iter();
-        let tab_index = it.position(|s| s == &row.0);
-        let ref_index = it.position(|s| s == &row.1);
+        //let mut it = sorted_tables.iter();
+        let tab_index = sorted_tables
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(&row.0));
+        let ref_index = sorted_tables
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(&row.1));
         if tab_index.is_none() {
-            Logger::info("Found a reference to a table {row.0} that doesn't exists");
+            Logger::info(format!(
+                "Found a reference to a table {} that doesn't exists",
+                row.0
+            ));
+            eprintln!("{}", sorted_tables.join(","));
             continue;
         }
         let tab_index = tab_index.unwrap();
         if ref_index.is_none() {
-            Logger::info("Found a referenced table {row.1} that doesn't exists");
+            Logger::info(format!(
+                "Found a referenced table {} that doesn't exists for {}",
+                row.1, row.0
+            ));
             continue;
         }
         let ref_index = ref_index.unwrap();
 
         if ref_index > tab_index {
-            sorted_tables.remove(ref_index);
-            sorted_tables.insert(tab_index, row.0);
+            let el = sorted_tables.remove(ref_index);
+            sorted_tables.insert(tab_index, el);
         }
     }
     return Ok(sorted_tables);
@@ -382,15 +421,19 @@ async fn order_views(
 
 fn reorder_vec(mut vec: Vec<String>, table_name: &String, ref_name: &String) -> Vec<String> {
     let mut it = vec.iter();
-    let tab_index = it.position(|s| s == table_name);
-    let ref_index = it.position(|s| s == ref_name);
+    let tab_index = it.position(|s| s.eq_ignore_ascii_case(table_name));
+    let ref_index = it.position(|s| s.eq_ignore_ascii_case(ref_name));
     if tab_index.is_none() {
-        Logger::info("Found a reference to a table/view {table_name} that doesn't exists");
+        Logger::info(format!(
+            "Found a reference to a table/view {table_name} that doesn't exists"
+        ));
         return vec;
     }
     let tab_index = tab_index.unwrap();
     if ref_index.is_none() {
-        Logger::info("Found a referenced table/view {ref_name} that doesn't exists");
+        Logger::info(format!(
+            "Found a referenced table/view {ref_name} that doesn't exists"
+        ));
         return vec;
     }
     let ref_index = ref_index.unwrap();
