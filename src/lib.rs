@@ -220,7 +220,7 @@ pub async fn export_data(
             if data.is_empty() {
                 continue;
             }
-            if count == 0 {
+            if count % max_insert_count == 0 {
                 writer
                     .print(format!("insert into `{}` ({}) values(", row.0, column_names).as_str());
             }
@@ -244,9 +244,7 @@ pub async fn export_data(
 
             count = count + 1;
             if count % max_insert_count == 0 {
-                writer.print(
-                    format!(");\ninsert into `{}` ({}) values(", row.0, column_names).as_str(),
-                );
+                writer.print(");\n");
             } else {
                 if i >= data_rows.len() - 1 {
                     writer.println(");");
