@@ -1,15 +1,22 @@
 pub mod logger;
 pub mod std_writer;
+use async_std::stream;
+use async_std::task::block_on;
 use logger::Logger;
 use regex::Regex;
 use sqlx::mysql::{MySql, MySqlColumn, MySqlRow};
-use sqlx::pool::Pool;
+use sqlx::pool::{Pool, self};
 use sqlx::types::chrono::Local;
 use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::types::BigDecimal;
 use sqlx::{Column, Row};
 use std::fmt::Display;
 use std_writer::StdWriter;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+const MAX_BUFFER_SIZE: usize = 20 * 1024 * 1024; // 20MB
 
 //
 // Export the table DDL - tables are ordered so that we try and
@@ -184,7 +191,7 @@ pub async fn export_triggers(
     Ok(())
 }
 
-pub async fn export_data(
+pub async fn export_data_single_core(
     pool: &Pool<MySql>,
     writer: &mut StdWriter,
     schema: &String,
@@ -255,6 +262,134 @@ pub async fn export_data(
         }
     }
 
+    Ok(())
+}
+
+pub async fn export_single_table(
+    schema: &String,
+    table_name: &String,
+    pool: &Pool<MySql>,
+    max_insert_count: i32,
+    skip_unknown_datatypes: bool,
+) -> Result<String, sqlx::Error> {
+    let mut output = String::with_capacity(MAX_BUFFER_SIZE);
+    output.push_str(format!("-- Extracting data for {}", table_name).as_str());
+    let mut count = 0;
+    // query table
+    let data_rows = sqlx::query::<>(&format!("select * from {}.{}", &schema, &table_name))
+        .fetch_all(pool).await?;
+    if data_rows.len() == 0 {
+        return Ok(output);
+    }
+    
+    let column_names = compute_column_name(data_rows.get(0).unwrap().columns());
+    for i in 0..data_rows.len() {
+        let data = data_rows.get(i);
+        if data.is_none() {
+            continue;
+        }
+        let data = data.unwrap();
+        if data.is_empty() {
+            continue;
+        }
+        if count % max_insert_count == 0 {
+            output.push_str(format!("insert into `{}` ({}) values(", table_name, column_names).as_str());
+        }
+
+        let cols = data.columns().len();
+        for i in 0..cols - 1 {
+            let value = cast_data(&data, i, skip_unknown_datatypes);
+            if let Some(value) = value {
+                output.push_str(format!("{},", value).as_str());
+            } else {
+                output.push_str("NULL,");
+            }
+        }
+
+        let value = cast_data(&data, cols - 1, skip_unknown_datatypes);
+        if let Some(value) = value {
+            output.push_str(format!("{}", value).as_str());
+        } else {
+            output.push_str("NULL");
+        }
+
+        count = count + 1;
+        if count % max_insert_count == 0 {
+            output.push_str(");\n");
+        } else {
+            if i >= data_rows.len() - 1 {
+                output.push_str(");\n");
+            } else {
+                output.push_str("),\n\t(");
+            }
+        }
+    }
+    Ok(output)
+
+}
+
+pub async fn export_data(
+    pool: &Pool<MySql>,
+    writer: &mut StdWriter,
+    thread_count: usize,
+    schema: &String,
+    single_row_inserts: bool,
+    skip_unknown_datatypes: bool,
+) -> Result<(), sqlx::Error> {
+    if thread_count == 1 {
+        return export_data_single_core(pool, writer, schema, single_row_inserts, skip_unknown_datatypes).await;
+    }
+    let max_insert_count = if single_row_inserts { 1 } else { 100 };
+
+    // Grab all of the tables from the selected schema
+    let mut table_names: Vec<(String,)> =
+        sqlx::query_as("select table_name from information_schema.tables where table_schema=? and table_type='BASE TABLE'")
+            .bind(&schema)
+            .fetch_all(pool)
+            .await?;
+
+    table_names.reverse();
+    let work_queue= Arc::new(Mutex::new(table_names));
+    let vec = Vec::<String>::new();
+    let result_queue = Arc::new(Mutex::new(vec));
+    let mut handles = vec![];
+
+    for i in 0..thread_count {
+        let thread_work_queue = work_queue.clone();
+        let result_queue = result_queue.clone();
+        let pool_own = pool.clone();
+        let schema = schema.clone();
+        let handle = thread::spawn(move || {
+            loop {
+                let mut work: Option<(String, )> =None;
+                {
+                    let mut work_queue = thread_work_queue.lock().unwrap();
+                    work = work_queue.pop();
+                }
+                if work.is_none() {
+                    return;
+                }
+                let table_name = work.unwrap().0;
+                let result = block_on(export_single_table(&schema, &table_name, &pool_own, max_insert_count, skip_unknown_datatypes));
+                if result.is_ok() {
+                    let mut result_queue = result_queue.lock().unwrap();
+                    result_queue.push(result.ok().unwrap());
+                }
+            }
+        });
+        handles.push(handle);
+    }
+    println!("Waiting for threads to finish. {}", handles.len());
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let result_queue = result_queue.lock().unwrap();
+    println!("Read {} arrays", result_queue.len());
+    for str in result_queue.iter() {
+        writer.println(str.as_str());
+    }
+    
     Ok(())
 }
 

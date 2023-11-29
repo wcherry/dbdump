@@ -35,6 +35,12 @@ struct Args {
     #[arg(short, long = "output-file", required = false)]
     output_file: Option<String>,
 
+    /// Thread count for data extraction
+    /// Default is 1
+    /// 0 means use the number of cores
+    #[arg(long = "thread-count", required = false, default_value_t = 1)]
+    thread_count: usize,
+
     /// Rename the schema
     #[arg(long = "new-schema-name", required = false)]
     renamed_schema_name: Option<String>,
@@ -84,11 +90,22 @@ async fn main() -> Result<(), sqlx::Error> {
     };
 
     //
+    // Compute number of threads to use
+    //
+    let thread_count = 
+    if args.thread_count == 0 {
+        let num_cpus = num_cpus::get();
+        if num_cpus > 1 { num_cpus - 1 } else { num_cpus }
+    } else {
+        args.thread_count
+    };
+
+    //
     // Create a pool of connections.
     // Probably overkill as we currently only use one connection
     //
     let pool = MySqlPoolOptions::new()
-        .max_connections(5)
+        .max_connections(thread_count as u32 +1)
         .connect(&url.to_string())
         .await?;
 
@@ -128,6 +145,7 @@ async fn main() -> Result<(), sqlx::Error> {
         export_data(
             &pool,
             &mut writer,
+            thread_count,
             &schema,
             args.single_row_inserts,
             args.skip_unknown_datatypes,
