@@ -1,0 +1,66 @@
+name: Build and Package
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Rust
+      uses: actions/setup-rust@v1
+      with:
+        toolchain: stable
+
+    - name: Build for Intel
+      run: cargo build --release
+
+    - name: Package for Intel
+      run: zip -r dbdump_intel.zip target/release/dbdump
+
+  build_apple_silicon:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Rust
+      uses: actions/setup-rust@v1
+      with:
+        toolchain: stable
+
+    - name: Build for Apple Silicon
+      run: cargo build --release --target aarch64-apple-darwin
+
+    - name: Package for Apple Silicon
+      run: zip -r dbdump_apple_silicon.zip target/aarch64-apple-darwin/release/dbdump
+
+  deploy:
+    runs-on: ubuntu-latest
+
+    needs: [build, build_apple_silicon]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Copy artifacts
+      run: |
+        cp build/dbdump_intel.zip deploy/
+        cp build_apple_silicon/dbdump_apple_silicon.zip deploy/
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: deploy-artifacts
+        path: deploy/
